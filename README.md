@@ -44,7 +44,9 @@ recommended if the Windtunnel will be used from multiple user accounts.
    installation directory was changed from the default of /usr/local,
    adapt the makefile using a text editor. Change the value of
    VRUI_MAKEDIR close to the beginning of the file as follows:
-   VRUI_MAKEDIR := &lt;Vrui install dir&gt;share/make
+   
+   VRUI_MAKEDIR := &lt;Vrui install dir&gt;/share/make
+   
    Where &lt;Vrui install dir&gt; is the installation directory chosen in
    step 0. Use $(HOME) to refer to the user's home directory instead
    of ~.
