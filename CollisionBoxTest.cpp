@@ -20,8 +20,13 @@ with the Virtual Wind Tunnel package; if not, write to the Free Software
 Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
 ***********************************************************************/
 
+/* Set to 1 to draw particles as solid spheres: */
 #define DRAW_PARTICLES_SPHERES 1
+
+/* Set to 1 if OpenGL supports geometry shaders: */
 #define HAVE_SPHERERENDERER 1
+
+/* Set to 1 to draw particles as alpha-blended sprites: */
 #define DRAW_PARTICLES_SPRITES 0
 
 #include <stdlib.h>
@@ -431,9 +436,6 @@ CollisionBoxTest::CollisionBoxTest(int& argc,char**& argv)
 		collisionBox=new MyCollisionBox(*file);
 		file=0;
 		
-		/* EVIL HACK: Override attenuation for circular simulations: */
-		// collisionBox->setAttenuation(0.99843);
-		
 		/* Retrieve collision box parameters: */
 		particleRadius=collisionBox->getParticleRadius();
 		attenuation=collisionBox->getAttenuation();
@@ -464,6 +466,7 @@ CollisionBoxTest::CollisionBoxTest(int& argc,char**& argv)
 		
 		/* Create a few particles: */
 		const MyCollisionBox::Box& boundaries=collisionBox->getBoundaries();
+		Point sp=collisionBox->getSphere();
 		int particleIndex;
 		for(particleIndex=0;particleIndex<numParticles;++particleIndex)
 			{
@@ -480,26 +483,49 @@ CollisionBoxTest::CollisionBoxTest(int& argc,char**& argv)
 						Scalar r2(0);
 						for(int j=0;j<MyCollisionBox::dimension;++j)
 							{
-							p[j]=Math::randUniformCC(collisionBox->getSphere()[j]-sphereRadius+particleRadius,collisionBox->getSphere()[j]+sphereRadius-particleRadius);
-							r2+=Math::sqr(p[j]-collisionBox->getSphere()[j]);
+							p[j]=Math::randUniformCC(sp[j]-sphereRadius+particleRadius,sp[j]+sphereRadius-particleRadius);
+							r2+=Math::sqr(p[j]-sp[j]);
 							}
 						if(r2<Math::sqr(sphereRadius-particleRadius))
 							break;
 						}
+					
+					/* Give the particle a random velocity: */
 					for(int j=0;j<MyCollisionBox::dimension;++j)
 						v[j]=Scalar(Math::randUniformCC(-speed,speed));
 					}
 				else
 					{
+					#if 1
+					/* Give the particle a random position inside the collision box: */
 					for(int j=0;j<MyCollisionBox::dimension;++j)
-						{
 						p[j]=Math::randUniformCC(boundaries.min[j]+particleRadius,boundaries.max[j]-particleRadius);
-						#if 0
-						if(j==1)
-							p[j]=Math::randUniformCC(boundaries.min[j]+particleRadius,boundaries.min[j]*0.667+boundaries.max[j]*0.333);
-						#endif
-						v[j]=Scalar(Math::randUniformCC(-speed,speed));
+					#else
+					/* Give the particle a random position around the spherical obstacle: */
+					while(true)
+						{
+						Scalar r2(0);
+						for(int j=0;j<MyCollisionBox::dimension;++j)
+							{
+							p[j]=Math::randUniformCC(sp[j]-sphereRadius*Scalar(4),sp[j]+sphereRadius*Scalar(4));
+							r2+=Math::sqr(p[j]-sp[j]);
+							}
+						if(r2>Math::sqr(sphereRadius+particleRadius)&&r2<Math::sqr(sphereRadius*Scalar(4)))
+							break;
 						}
+					#endif
+					
+					#if 1
+					/* Give the particle a random velocity: */
+					for(int j=0;j<MyCollisionBox::dimension;++j)
+						v[j]=Scalar(Math::randUniformCC(-speed,speed));
+					#else
+					/* Let the particle orbit the central sphere: */
+					Vector d=p-collisionBox->getSphere();
+					v=Geometry::normal(d);
+					Scalar vLen=Math::sqrt(gravity.mag()/d.mag())*sphereRadius;
+					v*=vLen/v.mag();
+					#endif
 					}
 				
 				/* Try adding the new particle: */
@@ -606,15 +632,12 @@ void CollisionBoxTest::frame(void)
 	lastApplicationTime=newApplicationTime;
 	
 	#if 0
-	/* Calculate total kinetic energy: */
-	Scalar energy(0);
-	for(MyCollisionBox::ParticleList::const_iterator pIt=collisionBox->getParticles().begin();pIt!=collisionBox->getParticles().end();++pIt)
+	static int frameIndex=0;
+	if((++frameIndex)%1000==0)
 		{
-		energy+=Scalar(0.5)*pIt->getVelocity().sqr();
-		energy+=Scalar(9.81)*Geometry::dist(pIt->getPosition(),collisionBox->getSphere());
-		// energy+=Scalar(9.81)*pIt->getPosition()[1];
+		/* Calculate total kinetic energy: */
+		std::cout<<'\r'<<collisionBox->calcTotalEnergy()<<"    "<<std::flush;
 		}
-	std::cout<<"\r"<<energy<<"    "<<std::flush;
 	#endif
 	
 	if(fire)
@@ -687,6 +710,7 @@ void CollisionBoxTest::display(GLContextData& contextData) const
 		glDisable(GL_LIGHTING);
 		glBegin(GL_QUADS);
 		glColor3f(1.0f,0.0f,0.0f);
+		const MyCollisionBox::Box& boundaries=collisionBox->getBoundaries();
 		Scalar pScale=Scalar(0.25)*(boundaries.max[0]-boundaries.min[0])/(pt*maxP);
 		Scalar xl=boundaries.min[0]-(boundaries.max[0]-boundaries.min[0])*Scalar(0.01);
 		Scalar xr=boundaries.max[0]+(boundaries.max[0]-boundaries.min[0])*Scalar(0.01);
@@ -909,12 +933,12 @@ void CollisionBoxTest::eventCallback(Vrui::Application::EventID eventId,Vrui::In
 			
 			case 1:
 				/* Set positive attenuation to remove energy from the simulation: */
-				collisionBox->setAttenuation(1.0/1.5); // (1.0/1.1);
+				collisionBox->setAttenuation(1.0/1.01);
 				break;
 			
 			case 2:
 				/* Set negative attenuation to add energy to the simulation: */
-				collisionBox->setAttenuation(1.1);
+				collisionBox->setAttenuation(1.01);
 				break;
 			
 			case 3:
@@ -1218,5 +1242,4 @@ void CollisionBoxTest::initContext(GLContextData& contextData) const
 	glBindBufferARB(GL_ARRAY_BUFFER_ARB,0);
 	}
 
-/* Run the application: */
 VRUI_APPLICATION_RUN(CollisionBoxTest)

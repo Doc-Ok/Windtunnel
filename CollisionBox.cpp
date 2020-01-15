@@ -29,8 +29,8 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
 #include <IO/File.h>
 #include <Math/Math.h>
 
-#define CENTRAL_GRAVITY 1
-#define GRAVITY_SQUARELAW 1
+/* Set to 1 to use a second-order Runge-Kutta solver: */
+#define SECOND_ORDER_INTEGRATION 1
 
 /*****************************
 Methods of class CollisionBox:
@@ -352,6 +352,38 @@ CollisionBox<ScalarParam,dimensionParam>::queueCollisionsWithSphere(
 		}
 	}
 
+#if HOLD_ENERGY
+
+template <class ScalarParam,int dimensionParam>
+inline
+void
+CollisionBox<ScalarParam,dimensionParam>::updateTotalEnergy(
+	void)
+	{
+	/* Calculate the sum of the kinetic and potential energies of all particles: */
+	#if CENTRAL_GRAVITY
+	Scalar g=gravity.mag()*sphereRadius2;
+	#endif
+	kineticEnergy=Scalar(0);
+	potentialEnergy=Scalar(0);
+	for(typename ParticleList::const_iterator pIt=particles.begin();pIt!=particles.end();++pIt)
+		{
+		/* Accumulate the particle's kinetic energy: */
+		kineticEnergy+=pIt->velocity.sqr();
+		
+		/* Accumulate the particle's potential energy: */
+		#if CENTRAL_GRAVITY
+		Scalar r=Geometry::dist(spherePosition,pIt->position);
+		potentialEnergy+=g*(Scalar(1)/sphereRadius-Scalar(1)/r);
+		#else
+		potentialEnergy-=pIt->position*gravity;
+		#endif
+		}
+	kineticEnergy*=Scalar(0.5);
+	}
+
+#endif
+
 template <class ScalarParam,int dimensionParam>
 inline
 CollisionBox<ScalarParam,dimensionParam>::CollisionBox(
@@ -373,6 +405,10 @@ CollisionBox<ScalarParam,dimensionParam>::CollisionBox(
 	 #if ACCUMULATE_PRESSURE
 	 ,
 	 numPressureSlots(0),pressureSlotSize(0),pressureSlots(0),pressureTime(0)
+	 #endif
+	 #if HOLD_ENERGY
+	 ,
+	 kineticEnergy(0),potentialEnergy(0)
 	 #endif
 	{
 	/* Calculate optimal number of cells and cell sizes: */
@@ -557,6 +593,11 @@ CollisionBox<ScalarParam,dimensionParam>::CollisionBox(
 		if(!addParticle(pos,vel))
 			std::cout<<"Warning: Unable to add particle from state file"<<std::endl;
 		}
+	
+	#if HOLD_ENERGY
+	/* Calculate the particle system's initial total energy: */
+	updateTotalEnergy();
+	#endif
 	}
 
 template <class ScalarParam,int dimensionParam>
@@ -639,7 +680,24 @@ CollisionBox<ScalarParam,dimensionParam>::addParticle(
 	p.timeStamp=Scalar(0);
 	cell->addParticle(&p);
 	
+	#if HOLD_ENERGY
+	
+	/* Accumulate the new particle's kinetic energy: */
+	kineticEnergy+=Scalar(0.5)*p.velocity.sqr();
+	
+	/* Accumulate the new particle's potential energy: */
+	#if CENTRAL_GRAVITY
+	Scalar g=gravity.mag()*sphereRadius2;
+	Scalar r=Geometry::dist(spherePosition,p.position);
+	potentialEnergy+=g*(Scalar(1)/sphereRadius-Scalar(1)/r);
+	#else
+	potentialEnergy-=pIt->position*gravity;
+	#endif
+	
+	#endif
+	
 	++numParticles;
+	
 	return true; // Particle succesfully added
 	}
 
@@ -694,6 +752,64 @@ void
 CollisionBox<ScalarParam,dimensionParam>::simulate(
 	typename CollisionBox<ScalarParam,dimensionParam>::Scalar timeStep)
 	{
+	/* Pre-compute acceleration constants: */
+	#if SECOND_ORDER_INTEGRATION
+	Scalar timeStepH=Math::div2(timeStep);
+	#endif
+	#if CENTRAL_GRAVITY
+	Scalar g=gravity.mag()*sphereRadius2; // Set g to the gravitational acceleration on the sphere's surface, for simplicity
+	#else // !CENTRAL_GRAVITY
+	#if SECOND_ORDER_INTEGRATION
+	Vector dv=gravity*timeStepH; // Velocity change in the first and second half time step due to gravity
+	#else // !SECOND_ORDER_INTEGRATION
+	Vector dv=gravity*timeStep; // Velocity change in this time step due to gravity
+	#endif
+	#endif
+	
+	#if CENTRAL_GRAVITY
+	
+	/* Calculate each particle's acceleration: */
+	for(typename ParticleList::iterator pIt=particles.begin();pIt!=particles.end();++pIt)
+		{
+		/* Calculate acceleration at particle's current position: */
+		Vector gDir=spherePosition-pIt->position;
+		Scalar gd2=gDir.sqr();
+		
+		#if SECOND_ORDER_INTEGRATION
+		
+		/* Calculate half-step acceleration at particle's current position: */
+		Vector a=gDir*(timeStepH*g/(gd2*Math::sqrt(gd2)));
+		
+		/* Calculate particle's half-step position: */
+		Point p1=pIt->position+pIt->velocity*timeStepH;
+		
+		/* Calculate acceleration at particle's half-step position: */
+		Vector gDir1=spherePosition-p1;
+		Scalar gd12=gDir1.sqr();
+		Vector a1=gDir1*(timeStep*g/(gd12*Math::sqrt(gd12)));
+		
+		/* Calculate particle's full-step velocity: */
+		pIt->velocity+=a;
+		
+		/* Store the full-step acceleration for later: */
+		pIt->dv=a1-a;
+		
+		#else // !SECOND_ORDER_INTEGRATION
+		
+		/* Calculate acceleration at particle's current position: */
+		pIt->dv=gDir*(timeStep*g/(gd2*Math::sqrt(gd2)));
+		
+		#endif
+		}
+	
+	#elif SECOND_ORDER_INTEGRATION
+	
+	/* Calculate each particle's full-step velocity: */
+	for(typename ParticleList::iterator pIt=particles.begin();pIt!=particles.end();++pIt)
+		pIt->velocity+=dv;
+	
+	#endif
+	
 	/* Initialize the collision queue: */
 	CollisionQueue collisionQueue(numParticles*dimension);
 	for(typename ParticleList::iterator pIt=particles.begin();pIt!=particles.end();++pIt)
@@ -833,57 +949,44 @@ CollisionBox<ScalarParam,dimensionParam>::simulate(
 		}
 	
 	/* Update all particles to the end of the timestep: */
-	#if CENTRAL_GRAVITY
-	Scalar g=gravity.mag();
-	#else
-	Vector dv=gravity*timeStep; // Velocity change in this time step due to gravity
-	#endif
 	if(attenuation!=Scalar(1))
 		{
 		Scalar att=Math::pow(attenuation,timeStep); // Scale attenuation factor for this time step
 		for(typename ParticleList::iterator pIt=particles.begin();pIt!=particles.end();++pIt)
 			{
-			/* Advance the particle's state: */
-			#if CENTRAL_GRAVITY
-			Vector dp=pIt->velocity*(timeStep-pIt->timeStamp);
-			Vector gDir=spherePosition-(pIt->position+dp*Scalar(0.5));
-			pIt->position+=dp;
-			#if GRAVITY_SQUARELAW
-			Scalar gd2=gDir.sqr();
-			pIt->velocity+=gDir*(timeStep*g/(gd2*Math::sqrt(gd2)));
-			#else
-			pIt->velocity+=gDir*(timeStep*g/gDir.mag());
-			#endif
-			#else
+			/* Move the particle to the end of the time step: */
 			pIt->position+=pIt->velocity*(timeStep-pIt->timeStamp);
-			pIt->velocity+=dv;
-			#endif
 			pIt->timeStamp=Scalar(0);
 			
+			/* Update the particle's velocity: */
+			#if CENTRAL_GRAVITY
+			/* Apply the previously calculated velocity delta: */
+			pIt->velocity+=pIt->dv;
+			#else // !CENTRAL_GRAVITY
+			/* Apply the constant velocity delta: */
+			pIt->velocity+=dv;
+			#endif
+			
 			/* Attenuate the particle's velocity: */
-			pIt->velocity*=att;
+			// pIt->velocity*=att;
 			}
 		}
 	else
 		{
 		for(typename ParticleList::iterator pIt=particles.begin();pIt!=particles.end();++pIt)
 			{
-			/* Advance the particle's state: */
-			#if CENTRAL_GRAVITY
-			Vector dp=pIt->velocity*(timeStep-pIt->timeStamp);
-			Vector gDir=spherePosition-(pIt->position+dp*Scalar(0.5));
-			pIt->position+=dp;
-			#if GRAVITY_SQUARELAW
-			Scalar gd2=gDir.sqr();
-			pIt->velocity+=gDir*(timeStep*g/(gd2*Math::sqrt(gd2)));
-			#else
-			pIt->velocity+=gDir*(timeStep*g/gDir.mag());
-			#endif
-			#else
+			/* Move the particle to the end of the time step: */
 			pIt->position+=pIt->velocity*(timeStep-pIt->timeStamp);
+			pIt->timeStamp=Scalar(0);
+			
+			/* Update the particle's velocity: */
+			#if CENTRAL_GRAVITY
+			/* Apply the previously calculated velocity delta: */
+			pIt->velocity+=pIt->dv;
+			#else // !CENTRAL_GRAVITY
+			/* Apply the constant velocity delta: */
 			pIt->velocity+=dv;
 			#endif
-			pIt->timeStamp=Scalar(0);
 			}
 		}
 	
@@ -897,6 +1000,28 @@ CollisionBox<ScalarParam,dimensionParam>::simulate(
 	
 	#if ACCUMULATE_PRESSURE
 	pressureTime+=timeStep;
+	#endif
+	
+	#if HOLD_ENERGY
+	
+	/* Calculate the particle system's new total energy: */
+	Scalar ke=kineticEnergy;
+	Scalar pe=potentialEnergy;
+	updateTotalEnergy();
+	
+	/* Calculate the particle system's new target total energy: */
+	Scalar newTotalEnergy=(ke+pe)*Math::pow(attenuation,timeStep*Scalar(2));
+	
+	/* Calculate the required change in kinetic energy to reach the target energy: */
+	Scalar velocityFactor=newTotalEnergy>potentialEnergy?Math::sqrt((newTotalEnergy-potentialEnergy)/kineticEnergy):Scalar(0);
+	kineticEnergy=Scalar(0);
+	for(typename ParticleList::iterator pIt=particles.begin();pIt!=particles.end();++pIt)
+		{
+		pIt->velocity*=velocityFactor;
+		kineticEnergy+=pIt->velocity.sqr();
+		}
+	kineticEnergy*=Scalar(0.5);
+	
 	#endif
 	}
 
@@ -943,6 +1068,33 @@ CollisionBox<ScalarParam,dimensionParam>::calcAverageSpeed(
 	return Math::sqrt(speedSum2/Scalar(numParticles));
 	}
 
+template <class ScalarParam,int dimensionParam>
+inline
+typename CollisionBox<ScalarParam,dimensionParam>::Scalar
+CollisionBox<ScalarParam,dimensionParam>::calcTotalEnergy(
+	void) const
+	{
+	/* Calculate the sum of the kinetic and potential energies of all particles: */
+	#if CENTRAL_GRAVITY
+	Scalar g=gravity.mag()*sphereRadius2;
+	#endif
+	Scalar kineticEnergy(0);
+	Scalar potentialEnergy(0);
+	for(typename ParticleList::const_iterator pIt=particles.begin();pIt!=particles.end();++pIt)
+		{
+		/* Accumulate the particle's kinetic energy: */
+		kineticEnergy+=pIt->velocity.sqr();
+		
+		/* Accumulate the particle's potential energy: */
+		#if CENTRAL_GRAVITY
+		Scalar r=Geometry::dist(spherePosition,pIt->position);
+		potentialEnergy+=g*(Scalar(1)/sphereRadius-Scalar(1)/r);
+		#else
+		potentialEnergy-=pIt->position*gravity;
+		#endif
+		}
+	return Scalar(0.5)*kineticEnergy+potentialEnergy;
+	}
 
 template <class ScalarParam,int dimensionParam>
 inline
@@ -1016,5 +1168,14 @@ CollisionBox<ScalarParam,dimensionParam>::fire(
 	Scalar fireRadius2=Math::sqr(fireRadius);
 	for(typename ParticleList::iterator pIt=particles.begin();pIt!=particles.end();++pIt)
 		if(Geometry::sqrDist(pIt->position,firePos)<fireRadius2)
+			{
+			#if HOLD_ENERGY
+			/* Update the particle system's total kinetic energy: */
+			Scalar preK=Scalar(0.5)*pIt->velocity.sqr();
+			kineticEnergy+=preK*(Math::sqr(fireSpeed)-Scalar(1));
+			#endif
+			
+			/* Update the particles' velocity: */
 			pIt->velocity*=fireSpeed; // /pIt->velocity.mag();
+			}
 	}

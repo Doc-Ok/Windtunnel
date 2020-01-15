@@ -31,7 +31,14 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
 #include <Geometry/Vector.h>
 #include <Geometry/Box.h>
 
+/* Set to 1 to pull particles towards the center of the spherical obstacle: */
+#define CENTRAL_GRAVITY 0
+
+/* Set to 1 to enable pressure visualization: */
 #define ACCUMULATE_PRESSURE 0
+
+/* Set to 1 to force conservation of energy: */
+#define HOLD_ENERGY 0
 
 /* Forward declarations: */
 namespace IO {
@@ -69,6 +76,9 @@ class CollisionBox
 		Scalar timeStamp; // Time stamp of particle in current simulation step
 		Particle* cellPred; // Pointer to particle's predecessor in same grid cell
 		Particle* cellSucc; // Pointer to particle's successor in same grid cell
+		#if CENTRAL_GRAVITY
+		Vector dv; // Velocity delta for particle in current time step
+		#endif
 		
 		/* Methods: */
 		public:
@@ -234,6 +244,11 @@ class CollisionBox
 	Scalar pressureTime; // Total simulation time over which pressure has been accumulated
 	#endif
 	
+	#if HOLD_ENERGY
+	Scalar kineticEnergy; // Particle system's current kinetic energy
+	Scalar potentialEnergy; // Particle system's current potential energy
+	#endif
+	
 	/* Private methods: */
 	void queueSphereCollisions(Scalar timeStep,CollisionQueue& collisionQueue);
 	void queueCollisionsInCell(GridCell* cell,Particle* particle1,Scalar timeStep,bool symmetric,Particle* otherParticle,CollisionQueue& collisionQueue);
@@ -241,6 +256,10 @@ class CollisionBox
 	void queueCollisions(Particle* particle1,Scalar timeStep,bool symmetric,Particle* otherParticle,CollisionQueue& collisionQueue);
 	void queueCollisionsOnCellChange(Particle* particle1,Scalar timeStep,int cellChangeDirection,CollisionQueue& collisionQueue);
 	void queueCollisionsWithSphere(Scalar timeStep,CollisionQueue& collisionQueue);
+	
+	#if HOLD_ENERGY
+	void updateTotalEnergy(void); // Re-calculates the particle system's total energy
+	#endif
 	
 	/* Constructors and destructors: */
 	public:
@@ -282,6 +301,7 @@ class CollisionBox
 		return spherePosition;
 		};
 	Scalar calcAverageSpeed(const Box& queryBox) const; // Returns the average speed (magnitude of velocity) of all particles inside the given box
+	Scalar calcTotalEnergy(void) const; // Calculates the total energy of the collision box's current state
 	void saveState(IO::File& file) const; // Writes the collision box's current state to the given file
 	#if ACCUMULATE_PRESSURE
 	void accumulatePressure(unsigned int newNumPressureSlots); // Starts accumulating gas pressure
